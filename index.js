@@ -2,72 +2,115 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 
-// Crear la aplicación Express
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Configurar CORS para permitir todas las peticiones
 app.use(cors());
 
-// Ruta para consultar datos en Notion
-app.get('/notion', async (req, res) => {
+const updateNotionDatabase = async () => {
   try {
-    // El ID de tu base de datos en Notion
-    const databaseId = 'd03874483db44f498080ad7ffe0b6219'; // Reemplaza con el ID de tu base de datos
+    const databaseId = 'e1c86c0d490c4ccdb7b3d92007dea981';
+    const notionToken = 'secret_uCBoeC7cnlFtq7VG4Dr58nBYFLFbR6dKzF00fZt2dq';
 
-    // Consulta a la API de Notion con un filtro para la propiedad "Bancos N" que contenga "Western"
-    const notionQuery = {
-      filter: {
-        property: 'Bancos N', // La propiedad "Bancos N" de la base de datos
-        title: {
-          contains: 'Western', // Busca títulos que contengan "Western"
-        },
-      },
-    };
-
-    // Hacer la petición POST a la API de Notion
     const response = await axios.post(
       `https://api.notion.com/v1/databases/${databaseId}/query`,
-      notionQuery,
+      {},
       {
         headers: {
-          Authorization: 'Bearer secret_uCBoeC7cnlFtq7VG4Dr58nBYFLFbR6dKzF00fZt2dq', // Token directo (NO SEGURO)
+          Authorization: `Bearer ${notionToken}`,
           'Content-Type': 'application/json',
           'Notion-Version': '2022-06-28',
+          'Cache-Control': 'no-cache',
+          Pragma: 'no-cache',
+          Expires: '0',
         },
       }
     );
 
-    // Extraer los resultados
-    const results = response.data.results.map((page) => {
-      const bancosTitle = page.properties['Bancos N'].title[0]?.text?.content || 'Sin datos';
+    const pages = response.data.results;
+    const phoneCount = {};
+    let processedNumbers = 0; // Contador de números procesados
 
-      // Acceder al valor de la fórmula en "Estado de datos"
-      const estadoDeDatos = page.properties['Estado Datos'].formula?.string || 'Sin estado';
-
-      // Acceder a la propiedad "Nacionalidad" de tipo Select
-      const nacionalidad = page.properties['Nacionalidad']?.select?.name || 'Sin nacionalidad';
-
-      // Acceder a la propiedad "Prioridad" de tipo Select
-      const prioridad = page.properties['Prioridad']?.select?.name || 'Sin prioridad';
-
-      return {
-        bancos: bancosTitle,
-        estadoDeDatos: estadoDeDatos,
-        nacionalidad: nacionalidad,
-        prioridad: prioridad,
-      };
+    // Contar cuántas veces aparece cada número en "Filtro de telefono"
+    pages.forEach(page => {
+      const filtroTelefono = page.properties['Filtro de telefono']?.formula?.string || '';
+      if (filtroTelefono) {
+        phoneCount[filtroTelefono] = (phoneCount[filtroTelefono] || 0) + 1;
+        processedNumbers++; // Incrementar el contador de números procesados
+      }
     });
 
-    // Enviar los resultados al cliente
-    res.status(200).json(results);
+    // Filtrar y mostrar los números duplicados en la consola
+    const duplicatedPhones = Object.entries(phoneCount).filter(([phone, count]) => count > 1);
+
+    if (duplicatedPhones.length > 0) {
+      console.log("Números duplicados:");
+      duplicatedPhones.forEach(([phone, count]) => {
+        console.log(`Número: ${phone}, Repeticiones: ${count}`);
+      });
+    } else {
+      console.log("No se encontraron números duplicados.");
+    }
+
+    // Actualizar cada página en función de si el teléfono está duplicado en "Filtro de telefono"
+    for (const page of pages) {
+      const filtroTelefono = page.properties['Filtro de telefono']?.formula?.string || '';
+
+      if (!filtroTelefono) {
+        continue;
+      }
+
+      // Solo etiquetar como duplicado si el número aparece más de una vez
+      if (phoneCount[filtroTelefono] > 1) {
+        const newLabel = `Duplicado (${phoneCount[filtroTelefono]})`;
+
+        await axios.patch(
+          `https://api.notion.com/v1/pages/${page.id}`,
+          {
+            properties: {
+              'Duplicado': {
+                select: {
+                  name: newLabel,
+                },
+              },
+            },
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${notionToken}`,
+              'Content-Type': 'application/json',
+              'Notion-Version': '2022-06-28',
+            },
+          }
+        );
+      }
+    }
+
+    // Obtener la hora actual en formato legible
+    const currentTime = new Date().toLocaleString();
+    console.log(`Base de datos de Notion actualizada con éxito a las ${currentTime}`);
+    console.log(`Total de números procesados: ${processedNumbers}`); // Mostrar el total de números procesados
   } catch (error) {
-    // Manejar errores
-    res.status(500).json({ error: error.response?.data || error.message });
+    console.error('Error al actualizar la base de datos de Notion:', error.message);
+  }
+};
+
+// Ejecutar la actualización inmediatamente al iniciar el servidor
+updateNotionDatabase();
+
+// Configurar la actualización periódica (cada 5 minutos en este ejemplo)
+const UPDATE_INTERVAL = 1 * 60 * 1000; // 5 minutos en milisegundos
+setInterval(updateNotionDatabase, UPDATE_INTERVAL);
+
+app.get('/notion', async (req, res) => {
+  try {
+    await updateNotionDatabase();
+    res.status(200).json({ message: 'Actualización manual iniciada con éxito.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Iniciar el servidor en el puerto definido
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en el puerto ${PORT}`);
 });
