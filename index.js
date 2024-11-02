@@ -3,7 +3,7 @@ const axios = require('axios');
 const cors = require('cors');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 30000;
 
 app.use(cors());
 
@@ -13,11 +13,22 @@ const BATCH_SIZE = 100; // Tamaño del lote para las actualizaciones
 
 let isUpdateInProgress = false;
 
+// Función para normalizar el número de teléfono
 const normalizePhoneNumber = (phone) => {
   if (!phone) return '';
-  return phone.replace(/[^0-9]/g, '');
+  
+  // Normaliza eliminando caracteres no numéricos
+  const normalized = phone.replace(/[^0-9]/g, '');
+  
+  // Si la longitud es menor de 10, ignora el número
+  if (normalized.length < 10) {
+    return ''; // Ignora números demasiado cortos
+  }
+
+  return normalized;
 };
 
+// Función para obtener todas las páginas de la base de datos de Notion
 const getAllPages = async (databaseId, notionToken) => {
   let allPages = [];
   let hasMore = true;
@@ -72,6 +83,7 @@ const getAllPages = async (databaseId, notionToken) => {
   return allPages;
 };
 
+// Programar la próxima actualización
 const scheduleNextUpdate = async () => {
   const delay = 60000; // 60 segundos de espera entre ciclos
   console.log(`\nProgramando próxima actualización en ${delay/1000} segundos...`);
@@ -79,6 +91,7 @@ const scheduleNextUpdate = async () => {
   updateNotionDatabase();
 };
 
+// Función para actualizar la base de datos de Notion
 const updateNotionDatabase = async () => {
   if (isUpdateInProgress) {
     console.log('Ya hay una actualización en progreso. Saltando esta iteración.');
@@ -96,34 +109,40 @@ const updateNotionDatabase = async () => {
     const pages = await getAllPages(databaseId, notionToken);
     console.log(`Total de registros recuperados: ${pages.length}`);
 
-    const phoneCount = {};
-    const phoneMapping = {};
-    let processedNumbers = 0;
+    const phoneCount = {}; // Conteo de números normalizados
+    const phoneMapping = {}; // Almacena formatos únicos de cada número normalizado
 
     pages.forEach(page => {
       const originalPhone = page.properties['Filtro de telefono']?.formula?.string || '';
-      if (originalPhone) {
-        const normalizedPhone = normalizePhoneNumber(originalPhone);
-        phoneCount[normalizedPhone] = (phoneCount[normalizedPhone] || 0) + 1;
-        
-        if (!phoneMapping[normalizedPhone]) {
-          phoneMapping[normalizedPhone] = new Set();
-        }
-        phoneMapping[normalizedPhone].add(originalPhone);
-        
-        processedNumbers++;
+      
+      // Normaliza y verifica el número
+      const normalizedPhone = normalizePhoneNumber(originalPhone);
+      if (!normalizedPhone) return; // Ignora números vacíos o no válidos
+
+      // Aumenta el conteo solo si el número es válido
+      phoneCount[normalizedPhone] = (phoneCount[normalizedPhone] || 0) + 1;
+
+      // Agrega la versión del número en su formato original al mapeo
+      if (!phoneMapping[normalizedPhone]) {
+        phoneMapping[normalizedPhone] = new Set();
       }
+      phoneMapping[normalizedPhone].add(originalPhone);
     });
 
-    const duplicatedPhones = Object.entries(phoneCount).filter(([phone, count]) => count > 1);
+    // Filtra solo aquellos números que son verdaderamente duplicados y tienen múltiples variantes
+    const duplicatedPhones = Object.entries(phoneMapping)
+      .filter(([phone, formats]) => formats.size > 1);
 
     if (duplicatedPhones.length > 0) {
       console.log("\nNúmeros duplicados encontrados:");
-      duplicatedPhones.forEach(([normalizedPhone, count]) => {
-        const formats = [...phoneMapping[normalizedPhone]].join(', ');
+      duplicatedPhones.forEach(([normalizedPhone, formats]) => {
         console.log(`\nNúmero normalizado: ${normalizedPhone}`);
-        console.log(`Formatos encontrados: ${formats}`);
-        console.log(`Repeticiones: ${count}`);
+        
+        [...formats].forEach((format, index) => {
+          console.log(`Duplicado${index + 1}: ${format}`);
+        });
+
+        console.log(`Repeticiones: ${formats.size}`);
       });
     } else {
       console.log("No se encontraron números duplicados.");
@@ -136,14 +155,18 @@ const updateNotionDatabase = async () => {
     for (const page of pages) {
       const originalPhone = page.properties['Filtro de telefono']?.formula?.string || '';
       
-      if (!originalPhone) {
+      if (!originalPhone || originalPhone.length < 10) { // Ignora los números vacíos o menores a 10 caracteres
         continue;
       }
 
       const normalizedPhone = normalizePhoneNumber(originalPhone);
 
-      if (phoneCount[normalizedPhone] > 1) {
-        const newLabel = `Duplicado (${phoneCount[normalizedPhone]})`;
+      if (phoneMapping[normalizedPhone]?.size > 1) { 
+        // Confirma que existen al menos 2 variantes (duplicados) antes de actualizar
+        const newLabel = `Duplicado (${phoneMapping[normalizedPhone].size})`;
+
+        console.log(`Actualizando duplicado: ${originalPhone} (Normalizado: ${normalizedPhone})`);
+        console.log(`Otras variantes del duplicado: ${[...phoneMapping[normalizedPhone]].join(', ')}`);
 
         try {
           await axios.patch(
@@ -175,7 +198,7 @@ const updateNotionDatabase = async () => {
 
           if (batchCount >= BATCH_SIZE) {
             console.log('Pausa entre lotes de actualizaciones...');
-            await new Promise(resolve => setTimeout(resolve, 15000)); // Aumentado a 15 segundos
+            await new Promise(resolve => setTimeout(resolve, 15000));
             batchCount = 0;
           } else {
             await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
@@ -184,7 +207,7 @@ const updateNotionDatabase = async () => {
         } catch (error) {
           if (error.response?.status === 429) {
             console.log('Límite de rate alcanzado, esperando 2 minutos...');
-            await new Promise(resolve => setTimeout(resolve, 120000)); // Aumentado a 2 minutos
+            await new Promise(resolve => setTimeout(resolve, 120000));
             continue;
           }
           console.error(`Error al actualizar página ${page.id}:`, error.message);
@@ -199,18 +222,18 @@ const updateNotionDatabase = async () => {
     console.log(`Hora de finalización: ${endTime.toLocaleString()}`);
     console.log(`Duración total: ${duration.toFixed(2)} minutos`);
     console.log(`Total de registros en la base de datos: ${pages.length}`);
-    console.log(`Total de números procesados: ${processedNumbers}`);
+    console.log(`Total de números procesados: ${Object.keys(phoneCount).length}`);
     console.log(`Total de registros actualizados: ${updatedCount}`);
 
   } catch (error) {
     console.error('Error al actualizar la base de datos de Notion:', error.message);
   } finally {
     isUpdateInProgress = false;
-    // Programar la siguiente actualización
     scheduleNextUpdate();
   }
 };
 
+// Endpoint para iniciar la actualización manualmente
 app.get('/notion', async (req, res) => {
   try {
     if (isUpdateInProgress) {
